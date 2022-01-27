@@ -35,7 +35,9 @@ module Svn2Git
       end
       fix_branches
       fix_tags
-      fix_trunk
+      if ! @options[:trunk].nil?
+        fix_trunk
+      end
       optimize_repos
     end
 
@@ -48,12 +50,15 @@ module Svn2Git
       options[:rootistrunk] = false
       options[:trunk] = 'trunk'
       options[:branches] = []
+      options[:branch] = []
       options[:tags] = []
       options[:exclude] = []
       options[:revision] = nil
       options[:username] = nil
       options[:password] = nil
       options[:rebasebranch] = false
+      options[:obar] = false
+      options[:skipinit] = false
 
       if File.exists?(File.expand_path(DEFAULT_AUTHORS_FILE))
         options[:authors] = DEFAULT_AUTHORS_FILE
@@ -87,6 +92,10 @@ module Svn2Git
           options[:branches] << branches
         end
 
+        opts.on('--branch BRANCH_PATH', 'Path to single branch from repository URL; can be used multiple times') do |branch|
+            options[:branch] << branch
+          end
+
         opts.on('--tags TAGS_PATH', 'Subpath to tags from repository URL (default: tags); can be used multiple times') do |tags|
           options[:tags] << tags
         end
@@ -95,6 +104,7 @@ module Svn2Git
           options[:rootistrunk] = true
           options[:trunk] = nil
           options[:branches] = nil
+          options[:branch] = nil
           options[:tags] = nil
         end
 
@@ -138,6 +148,14 @@ module Svn2Git
           options[:rebasebranch] = rebasebranch
         end
 
+        opts.on('-obar','--only-branches-at-root', 'Only the name branches will be at git root others in folders, e.g: releases will store branches under releases git folder') do
+            options[:obar] = true
+        end
+
+        opts.on('--skip-init', 'Use only in case need to continue post the init') do
+            options[:skipinit] = true
+        end
+
         opts.separator ""
 
         # No argument, shows at tail.  This will print an options summary.
@@ -161,7 +179,7 @@ module Svn2Git
     end
 
     def self.checkout_svn_branch(branch)
-      "git checkout -b \"#{branch}\" \"remotes/svn/#{branch}\""
+      "git checkout -f -b \"#{branch}\" \"remotes/svn/#{branch}\""
     end
 
   private
@@ -169,6 +187,7 @@ module Svn2Git
     def clone!
       trunk = @options[:trunk]
       branches = @options[:branches]
+      branch = @options[:branch]
       tags = @options[:tags]
       metadata = @options[:metadata]
       nominimizeurl = @options[:nominimizeurl]
@@ -179,52 +198,74 @@ module Svn2Git
       username = @options[:username]
       password = @options[:password]
 
-      if rootistrunk
-        # Non-standard repository layout.  The repository root is effectively 'trunk.'
-        cmd = "git svn init --prefix=svn/ "
-        cmd += "--username='#{username}' " unless username.nil?
-        cmd += "--password='#{password}' " unless password.nil?
-        cmd += "--no-metadata " unless metadata
-        if nominimizeurl
-          cmd += "--no-minimize-url "
-        end
-        cmd += "--trunk='#{@url}'"
-        run_command(cmd, true, true)
+      if ! @options[:skipinit]
+        if rootistrunk
+            # Non-standard repository layout.  The repository root is effectively 'trunk.'
+            cmd = "git svn init --prefix=svn/ "
+            cmd += "--username='#{username}' " unless username.nil?
+            cmd += "--password='#{password}' " unless password.nil?
+            cmd += "--no-metadata " unless metadata
+            if nominimizeurl
+            cmd += "--no-minimize-url "
+            end
+            cmd += "--trunk='#{@url}'"
+            run_command(cmd, true, true)
 
-      else
-        cmd = "git svn init --prefix=svn/ "
+        else
+            cmd = "git svn init --prefix=svn/ "
 
-        # Add each component to the command that was passed as an argument.
-        cmd += "--username='#{username}' " unless username.nil?
-        cmd += "--password='#{password}' " unless password.nil?
-        cmd += "--no-metadata " unless metadata
-        if nominimizeurl
-          cmd += "--no-minimize-url "
-        end
-        cmd += "--trunk='#{trunk}' " unless trunk.nil?
-        unless tags.nil?
-          # Fill default tags here so that they can be filtered later
-          tags = ['tags'] if tags.empty?
-          # Process default or user-supplied tags
-          tags.each do |tag|
-            cmd += "--tags='#{tag}' "
-          end
-        end
-        unless branches.nil?
-          # Fill default branches here so that they can be filtered later
-          branches = ['branches'] if branches.empty?
-          # Process default or user-supplied branches
-          branches.each do |branch|
-            cmd += "--branches='#{branch}' "
-          end
+            # Add each component to the command that was passed as an argument.
+            cmd += "--username='#{username}' " unless username.nil?
+            cmd += "--password='#{password}' " unless password.nil?
+            cmd += "--no-metadata " unless metadata
+            if nominimizeurl
+            cmd += "--no-minimize-url "
+            end
+            cmd += "--trunk=#{trunk} " unless trunk.nil?
+            unless tags.nil?
+            # Fill default tags here so that they can be filtered later
+            tags = ['tags'] if tags.empty?
+            # Process default or user-supplied tags
+            tags.each do |tag|
+                cmd += "--tags=#{tag} "
+            end
+            end
+            unless branches.nil?
+            # Fill default branches here so that they can be filtered later
+            branches = ['branches'] if branches.empty?
+            # Process default or user-supplied branches
+            branches.each do |branch|
+                if @options[:obar] && branch.strip != 'branches'
+                    puts "Custom config for #{branch} (the flag obar=only-branches-at-root is true)\n"
+                else
+                    cmd += "--branches=#{branch} "
+                end
+            end
+            end
+
+            cmd += @url
+
+            run_command(cmd, true, true)
         end
 
-        cmd += @url
+        run_command("#{git_config_command} svn.authorsfile #{authors}") unless authors.nil?
 
-        run_command(cmd, true, true)
+        if @options[:obar]
+            branches.each do |branch|
+                if branch.strip != 'branches'
+                    run_command("git config --add svn-remote.svn.branches \"#{branch}/*:refs/remotes/svn/#{branch.gsub("/branches","")}/*\"")
+                end
+            end
+        end
+
+        unless branch.nil?
+            branch.each do |fbranch|
+                run_command("git config --add svn-remote.svn.fetch #{fbranch}:refs/remotes/svn/#{fbranch.gsub("/branches","")}")
+                #run_command("git config --add svn-remote.#{branch}.url #{@url}/#{branch}/")
+                #run_command("git config --add svn-remote.#{branch}.fetch #{branch}:refs/remotes/#{branch}")
+            end
+        end
       end
-
-      run_command("#{git_config_command} svn.authorsfile #{authors}") unless authors.nil?
 
       cmd = "git svn fetch "
       unless revision.nil?
@@ -244,6 +285,7 @@ module Svn2Git
         regex = '^(?:' + regex.join('|') + ')(?:' + exclude.join('|') + ')'
         cmd += "--ignore-paths='#{regex}' "
       end
+      puts "Running #{cmd}...\n"
       run_command(cmd, true, true)
 
       get_branches
@@ -261,11 +303,11 @@ module Svn2Git
     end
 
     def get_rebasebranch
-	  get_branches 
+	  get_branches
 	  @local = @local.find_all{|l| l == @options[:rebasebranch]}
 	  @remote = @remote.find_all{|r| r.include? @options[:rebasebranch]}
 
-      if @local.count > 1 
+      if @local.count > 1
         pp "To many matching branches found (#{@local})."
         exit 1
       elsif @local.count == 0
